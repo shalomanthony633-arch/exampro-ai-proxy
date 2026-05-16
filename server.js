@@ -8,19 +8,25 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// 🔒 API KEY - ONLY HERE, NEVER IN FRONTEND
-const GEMINI_API_KEY = 'AIzaSyB_1V4a3hZiWF0eJeYe5m3l_Twl-LsDAQ4';
+// 🔒 API KEY from environment variable (set in Render dashboard)
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+
+// Verify key exists
+if (!GEMINI_API_KEY) {
+  console.error('❌ ERROR: GEMINI_API_KEY environment variable not set!');
+  console.error('Set it in Render Dashboard → Environment');
+}
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ExamPro AI Proxy is running' });
+  res.json({ status: 'ExamPro AI Proxy is running', keyConfigured: !!GEMINI_API_KEY });
 });
 
 // Generate questions from TEXT notes
 app.post('/api/generate-text', async (req, res) => {
   try {
     const { subject, count, notes } = req.body;
-
+    
     const prompt = `You are an exam question generator for Nigerian university students. Generate exactly ${count} multiple choice questions based on these lecture notes for the course "${subject}".
 
 STRICT RULES:
@@ -64,7 +70,7 @@ ${notes}`;
     const data = await response.json();
     const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const clean = rawText.replace(/```json|```/g, '').trim();
-
+    
     let parsed;
     try {
       parsed = JSON.parse(clean);
@@ -87,11 +93,11 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     const { subject, count } = req.body;
     const photoBuffer = req.file?.buffer;
     const mimeType = req.file?.mimetype || 'image/jpeg';
-
+    
     if (!photoBuffer) throw new Error('No photo uploaded');
-
+    
     const base64 = photoBuffer.toString('base64');
-
+    
     const prompt = `Read the notes in this image and generate exactly ${count} multiple choice questions for the course "${subject}". STRICT: 4 options each, even answer distribution, brief explanations. Output ONLY a JSON array.`;
 
     const response = await fetch(
@@ -120,7 +126,7 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     const data = await response.json();
     const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
     const clean = rawText.replace(/```json|```/g, '').trim();
-
+    
     let parsed;
     try {
       parsed = JSON.parse(clean);
