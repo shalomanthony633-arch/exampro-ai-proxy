@@ -1,109 +1,103 @@
+const express = require('express');
+const cors = require('cors');
+const fetch = require('node-fetch');
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
 
-# Read the current server.js
-with open('/mnt/agents/output/server.js', 'r') as f:
-    backend = f.read()
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: '10mb' }));
 
-# Replace the parsing logic with a more robust version that handles edge cases
-old_parse = """    let rawText = '';
-    
-    // Handle different Gemini response formats
-    if (data.candidates && data.candidates[0]) {
-      const candidate = data.candidates[0];
-      if (candidate.content && candidate.content.parts) {
-        rawText = candidate.content.parts.map(p => p.text || '').join('');
-      } else if (candidate.output) {
-        rawText = candidate.output;
-      }
-    }
-    
-    if (!rawText) throw new Error('Empty response from AI');
-    
-    // Clean up the response
-    let clean = rawText.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-    
-    // Remove any text before [ and after ]
-    const startIdx = clean.indexOf('[');
-    const endIdx = clean.lastIndexOf(']');
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      clean = clean.substring(startIdx, endIdx + 1);
-    }
-    
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch (e) {
-      console.error('Parse error, raw text:', rawText.substring(0, 500));
-      throw new Error('Could not parse AI response as JSON: ' + e.message);
-    }"""
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-new_parse = """    let rawText = '';
-    
-    // Handle different Gemini response formats
-    if (data.candidates && data.candidates[0]) {
-      const candidate = data.candidates[0];
-      if (candidate.content && candidate.content.parts) {
-        rawText = candidate.content.parts.map(p => p.text || '').join('');
-      } else if (candidate.output) {
-        rawText = candidate.output;
-      }
-    }
-    
-    if (!rawText) throw new Error('Empty response from AI');
-    
-    console.log('Raw AI response (first 300 chars):', rawText.substring(0, 300));
-    
-    // Clean up the response - remove markdown code blocks
-    let clean = rawText
-      .replace(/```json\s*/gi, '')
-      .replace(/```\s*/gi, '')
-      .replace(/^\s*json\s*/i, '')
-      .trim();
-    
-    // Find the JSON array - look for [ ... ]
-    const startIdx = clean.indexOf('[');
-    const endIdx = clean.lastIndexOf(']');
-    if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-      clean = clean.substring(startIdx, endIdx + 1);
-    }
-    
-    // Also try to find array if wrapped in other text
-    if (!clean.startsWith('[')) {
-      const arrayMatch = rawText.match(/\[\s*\{\s*"q"\s*:/);
-      if (arrayMatch) {
-        const start = rawText.indexOf('[');
-        const end = rawText.lastIndexOf(']');
-        if (start !== -1 && end !== -1) {
-          clean = rawText.substring(start, end + 1);
-        }
-      }
-    }
-    
-    let parsed;
-    try {
-      parsed = JSON.parse(clean);
-    } catch (e) {
-      console.error('First parse failed, trying alternative...');
-      // Try to extract anything that looks like JSON array
-      const fallbackMatch = rawText.match(/\[[\s\S]*?\]/);
-      if (fallbackMatch) {
-        try {
-          parsed = JSON.parse(fallbackMatch[0]);
-          console.log('Fallback parse succeeded');
-        } catch (e2) {
-          console.error('Fallback also failed');
-          throw new Error('Could not parse AI response as JSON');
-        }
-      } else {
-        throw new Error('Could not parse AI response as JSON');
-      }
-    }"""
+if (!GEMINI_API_KEY) {
+  console.error('ERROR: GEMINI_API_KEY not set');
+}
 
-backend = backend.replace(old_parse, new_parse)
+app.get('/', (req, res) => {
+  res.json({ status: 'Running', keyConfigured: !!GEMINI_API_KEY });
+});
 
-# Save
-with open('/mnt/agents/output/server.js', 'w') as f:
-    f.write(backend)
+function parseResponse(data) {
+  let text = '';
+  if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
+    text = data.candidates[0].content.parts.map(p => p.text || '').join('');
+  }
+  if (!text) throw new Error('Empty AI response');
+  
+  // Clean markdown
+  text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  
+  // Find JSON array
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start >= 0 && end > start) {
+    text = text.substring(start, end + 1);
+  }
+  
+  return JSON.parse(text);
+}
 
-print("✅ Backend parsing improved")
-print("Handles markdown blocks:", '```json' in backend)
-print("Has fallback parsing:", 'fallbackMatch' in backend)
+app.post('/api/generate-text', async (req, res) => {
+  try {
+    const { subject, count, notes } = req.body;
+    const prompt = `Generate exactly ${count} MCQ questions for "${subject}" from these notes. Each with 4 options (A,B,C,D), correct answer index (0-3), and explanation. Return ONLY JSON array: [{"q":"...","options":["...","...","...","..."],"answer":0,"explanation":"..."}]
+
+NOTES: ${notes}`;
+
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
+      })
+    });
+
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    const data = await resp.json();
+    const parsed = parseResponse(data);
+    res.json({ success: true, questions: parsed });
+  } catch (err) {
+    console.error('Text error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
+  try {
+    const { subject, count } = req.body;
+    const buffer = req.file?.buffer;
+    const mimeType = req.file?.mimetype || 'image/jpeg';
+    if (!buffer) throw new Error('No photo');
+    
+    const base64 = buffer.toString('base64');
+    const prompt = `Generate exactly ${count} MCQ questions from this image for "${subject}". Each with 4 options, correct answer index, explanation. Return ONLY JSON array.`;
+
+    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ 
+          role: 'user', 
+          parts: [
+            { inline_data: { mime_type: mimeType, data: base64 } },
+            { text: prompt }
+          ] 
+        }],
+        generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
+      })
+    });
+
+    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+    const data = await resp.json();
+    const parsed = parseResponse(data);
+    res.json({ success: true, questions: parsed });
+  } catch (err) {
+    console.error('Photo error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Proxy on port ${PORT}`));
