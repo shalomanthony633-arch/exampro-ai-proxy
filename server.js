@@ -8,34 +8,23 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const MODEL = 'gemini-1.5-flash'; // Better free tier: 15 RPM, 1500 RPD
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
 
-if (!GEMINI_API_KEY) {
-  console.error('ERROR: GEMINI_API_KEY not set in environment');
+if (!OPENROUTER_API_KEY) {
+  console.error('ERROR: OPENROUTER_API_KEY not set in environment');
 }
 
 app.get('/', (req, res) => {
   res.json({ 
-    status: 'ExamPro AI Proxy running', 
+    status: 'ExamPro AI Proxy (OpenRouter) running', 
     model: MODEL,
-    keyConfigured: !!GEMINI_API_KEY 
+    keyConfigured: !!OPENROUTER_API_KEY 
   });
 });
 
-function parseAIResponse(data) {
-  let text = '';
-  
-  if (data.candidates && data.candidates[0]) {
-    const c = data.candidates[0];
-    if (c.content && c.content.parts) {
-      text = c.content.parts.map(p => p.text || '').join('');
-    }
-  }
-  
-  if (!text) {
-    throw new Error('Empty response from AI');
-  }
+function parseAIResponse(text) {
+  if (!text) throw new Error('Empty response from AI');
   
   // Remove markdown
   text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
@@ -74,30 +63,35 @@ Return ONLY this JSON format, no other text:
 NOTES:
 ${notes}`;
 
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.3 }
-        })
-      }
-    );
+    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://exampro-ai-proxy.onrender.com',
+        'X-Title': 'ExamPro AI'
+      },
+      body: JSON.stringify({
+        model: MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.3,
+        max_tokens: 8192
+      })
+    });
 
     if (!resp.ok) {
       const errData = await resp.json().catch(() => ({}));
       const msg = errData.error?.message || `API error ${resp.status}`;
       
       if (resp.status === 429) {
-        throw new Error('Rate limit hit. Wait 1 minute and try again. Free tier: 15 requests/min, 1500/day.');
+        throw new Error('Rate limit hit. Wait 1 minute and try again.');
       }
       throw new Error(msg);
     }
 
     const data = await resp.json();
-    const questions = parseAIResponse(data);
+    const rawText = data.choices?.[0]?.message?.content || '';
+    const questions = parseAIResponse(rawText);
     
     if (!Array.isArray(questions) || questions.length === 0) {
       throw new Error('AI returned empty questions array');
@@ -122,6 +116,7 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     }
     
     const base64 = buffer.toString('base64');
+    const dataUrl = `data:${mimeType};base64,${base64}`;
     
     const prompt = `Read the lecture notes in this image and generate exactly ${count} multiple choice exam questions for "${subject}".
 
@@ -134,36 +129,41 @@ RULES:
 Return ONLY this JSON format:
 [{"q":"question","options":["A","B","C","D"],"answer":0,"explanation":"why"}]`;
 
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ 
-            role: 'user', 
-            parts: [
-              { inline_data: { mime_type: mimeType, data: base64 } },
-              { text: prompt }
-            ] 
-          }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.3 }
-        })
-      }
-    );
+    const resp = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://exampro-ai-proxy.onrender.com',
+        'X-Title': 'ExamPro AI'
+      },
+      body: JSON.stringify({
+        model: 'meta-llama/llama-3.2-11b-vision-instruct:free',
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: dataUrl } }
+          ]
+        }],
+        temperature: 0.3,
+        max_tokens: 8192
+      })
+    });
 
     if (!resp.ok) {
       const errData = await resp.json().catch(() => ({}));
       const msg = errData.error?.message || `API error ${resp.status}`;
       
       if (resp.status === 429) {
-        throw new Error('Rate limit hit. Wait 1 minute and try again. Free tier: 15 requests/min, 1500/day.');
+        throw new Error('Rate limit hit. Wait 1 minute and try again.');
       }
       throw new Error(msg);
     }
 
     const data = await resp.json();
-    const questions = parseAIResponse(data);
+    const rawText = data.choices?.[0]?.message?.content || '';
+    const questions = parseAIResponse(rawText);
     
     if (!Array.isArray(questions) || questions.length === 0) {
       throw new Error('AI returned empty questions array');
@@ -177,4 +177,4 @@ Return ONLY this JSON format:
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy on port ${PORT} using ${MODEL}`));
+app.listen(PORT, () => console.log(`Proxy on port ${PORT} using OpenRouter`));
