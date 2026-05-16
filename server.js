@@ -9,55 +9,101 @@ app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const MODEL = 'gemini-1.5-flash'; // Better free tier: 15 RPM, 1500 RPD
 
 if (!GEMINI_API_KEY) {
-  console.error('ERROR: GEMINI_API_KEY not set');
+  console.error('ERROR: GEMINI_API_KEY not set in environment');
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'Running', keyConfigured: !!GEMINI_API_KEY });
+  res.json({ 
+    status: 'ExamPro AI Proxy running', 
+    model: MODEL,
+    keyConfigured: !!GEMINI_API_KEY 
+  });
 });
 
-function parseResponse(data) {
+function parseAIResponse(data) {
   let text = '';
-  if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) {
-    text = data.candidates[0].content.parts.map(p => p.text || '').join('');
+  
+  if (data.candidates && data.candidates[0]) {
+    const c = data.candidates[0];
+    if (c.content && c.content.parts) {
+      text = c.content.parts.map(p => p.text || '').join('');
+    }
   }
-  if (!text) throw new Error('Empty AI response');
   
-  // Clean markdown
-  text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+  if (!text) {
+    throw new Error('Empty response from AI');
+  }
   
-  // Find JSON array
+  // Remove markdown
+  text = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+  
+  // Extract JSON array
   const start = text.indexOf('[');
   const end = text.lastIndexOf(']');
+  
   if (start >= 0 && end > start) {
     text = text.substring(start, end + 1);
   }
   
-  return JSON.parse(text);
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new Error('AI returned invalid JSON. Raw: ' + text.substring(0, 200));
+  }
 }
 
 app.post('/api/generate-text', async (req, res) => {
   try {
     const { subject, count, notes } = req.body;
-    const prompt = `Generate exactly ${count} MCQ questions for "${subject}" from these notes. Each with 4 options (A,B,C,D), correct answer index (0-3), and explanation. Return ONLY JSON array: [{"q":"...","options":["...","...","...","..."],"answer":0,"explanation":"..."}]
+    
+    const prompt = `Generate exactly ${count} multiple choice exam questions for the course "${subject}" based on these lecture notes.
 
-NOTES: ${notes}`;
+RULES:
+- Exactly ${count} questions
+- Each has 4 options: A, B, C, D
+- Include correct answer index (0=A, 1=B, 2=C, 3=D)
+- Include brief explanation
+- Base ONLY on the provided notes
 
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts: [{ text: prompt }] }],
-        generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
-      })
-    });
+Return ONLY this JSON format, no other text:
+[{"q":"question","options":["A","B","C","D"],"answer":0,"explanation":"why"}]
 
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+NOTES:
+${notes}`;
+
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.3 }
+        })
+      }
+    );
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      const msg = errData.error?.message || `API error ${resp.status}`;
+      
+      if (resp.status === 429) {
+        throw new Error('Rate limit hit. Wait 1 minute and try again. Free tier: 15 requests/min, 1500/day.');
+      }
+      throw new Error(msg);
+    }
+
     const data = await resp.json();
-    const parsed = parseResponse(data);
-    res.json({ success: true, questions: parsed });
+    const questions = parseAIResponse(data);
+    
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new Error('AI returned empty questions array');
+    }
+    
+    res.json({ success: true, questions });
   } catch (err) {
     console.error('Text error:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -69,30 +115,61 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     const { subject, count } = req.body;
     const buffer = req.file?.buffer;
     const mimeType = req.file?.mimetype || 'image/jpeg';
-    if (!buffer) throw new Error('No photo');
+    
+    if (!buffer) throw new Error('No photo uploaded');
+    if (buffer.length > 4 * 1024 * 1024) {
+      throw new Error('Photo too large. Max 4MB. Please compress or crop.');
+    }
     
     const base64 = buffer.toString('base64');
-    const prompt = `Generate exactly ${count} MCQ questions from this image for "${subject}". Each with 4 options, correct answer index, explanation. Return ONLY JSON array.`;
+    
+    const prompt = `Read the lecture notes in this image and generate exactly ${count} multiple choice exam questions for "${subject}".
 
-    const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ 
-          role: 'user', 
-          parts: [
-            { inline_data: { mime_type: mimeType, data: base64 } },
-            { text: prompt }
-          ] 
-        }],
-        generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
-      })
-    });
+RULES:
+- Exactly ${count} questions
+- Each has 4 options: A, B, C, D
+- Include correct answer index (0=A, 1=B, 2=C, 3=D)
+- Include brief explanation
 
-    if (!resp.ok) throw new Error(`API error: ${resp.status}`);
+Return ONLY this JSON format:
+[{"q":"question","options":["A","B","C","D"],"answer":0,"explanation":"why"}]`;
+
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ 
+            role: 'user', 
+            parts: [
+              { inline_data: { mime_type: mimeType, data: base64 } },
+              { text: prompt }
+            ] 
+          }],
+          generationConfig: { maxOutputTokens: 8192, temperature: 0.3 }
+        })
+      }
+    );
+
+    if (!resp.ok) {
+      const errData = await resp.json().catch(() => ({}));
+      const msg = errData.error?.message || `API error ${resp.status}`;
+      
+      if (resp.status === 429) {
+        throw new Error('Rate limit hit. Wait 1 minute and try again. Free tier: 15 requests/min, 1500/day.');
+      }
+      throw new Error(msg);
+    }
+
     const data = await resp.json();
-    const parsed = parseResponse(data);
-    res.json({ success: true, questions: parsed });
+    const questions = parseAIResponse(data);
+    
+    if (!Array.isArray(questions) || questions.length === 0) {
+      throw new Error('AI returned empty questions array');
+    }
+    
+    res.json({ success: true, questions });
   } catch (err) {
     console.error('Photo error:', err.message);
     res.status(500).json({ success: false, error: err.message });
@@ -100,4 +177,4 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Proxy on port ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy on port ${PORT} using ${MODEL}`));
