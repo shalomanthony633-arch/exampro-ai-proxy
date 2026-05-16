@@ -8,18 +8,18 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
-// 🔒 API KEY from environment variable (set in Render dashboard)
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// 🔒 GROQ API KEY - ONLY HERE, NEVER IN FRONTEND
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 // Verify key exists
-if (!GEMINI_API_KEY) {
-  console.error('❌ ERROR: GEMINI_API_KEY environment variable not set!');
+if (!GROQ_API_KEY) {
+  console.error('❌ ERROR: GROQ_API_KEY environment variable not set!');
   console.error('Set it in Render Dashboard → Environment');
 }
 
 // Health check
 app.get('/', (req, res) => {
-  res.json({ status: 'ExamPro AI Proxy is running', keyConfigured: !!GEMINI_API_KEY });
+  res.json({ status: 'ExamPro AI Proxy (Groq) is running', keyConfigured: !!GROQ_API_KEY });
 });
 
 // Generate questions from TEXT notes
@@ -50,17 +50,19 @@ Respond with ONLY a JSON array, no markdown, no backticks, no extra text:
 LECTURE NOTES:
 ${notes}`;
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
-        })
-      }
-    );
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.3-70b-versatile',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.4,
+        max_tokens: 8192
+      })
+    });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -68,7 +70,7 @@ ${notes}`;
     }
 
     const data = await response.json();
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const rawText = data.choices?.[0]?.message?.content || '';
     const clean = rawText.replace(/```json|```/g, '').trim();
     
     let parsed;
@@ -100,23 +102,27 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     
     const prompt = `Read the notes in this image and generate exactly ${count} multiple choice questions for the course "${subject}". STRICT: 4 options each, even answer distribution, brief explanations. Output ONLY a JSON array.`;
 
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ 
-            role: 'user', 
-            parts: [
-              { inline_data: { mime_type: mimeType, data: base64 } },
-              { text: prompt }
-            ] 
-          }],
-          generationConfig: { maxOutputTokens: 8192, temperature: 0.4 }
-        })
-      }
-    );
+    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${GROQ_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'llama-3.2-11b-vision-preview',
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64}` } }
+            ]
+          }
+        ],
+        temperature: 0.4,
+        max_tokens: 8192
+      })
+    });
 
     if (!response.ok) {
       const err = await response.json().catch(() => ({}));
@@ -124,7 +130,7 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
     }
 
     const data = await response.json();
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const rawText = data.choices?.[0]?.message?.content || '';
     const clean = rawText.replace(/```json|```/g, '').trim();
     
     let parsed;
@@ -145,5 +151,5 @@ app.post('/api/generate-photo', upload.single('photo'), async (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`ExamPro AI Proxy running on port ${PORT}`);
+  console.log(`ExamPro AI Proxy (Groq) running on port ${PORT}`);
 });
